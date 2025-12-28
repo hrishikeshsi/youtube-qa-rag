@@ -8,6 +8,7 @@ faiss-cpu>=1.7.4
 
 # YouTube transcript
 youtube-transcript-api>=0.6.2
+pytube>=15.0.0
 
 # Web interface
 streamlit>=1.38.0

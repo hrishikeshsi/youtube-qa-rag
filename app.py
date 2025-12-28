@@ -1,10 +1,11 @@
 import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_community.document_loaders import YoutubeLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
+from youtube_transcript_api import YouTubeTranscriptApi
 from dotenv import load_dotenv
 import os
 import re
@@ -59,18 +60,55 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 def load_youtube_transcript(video_url: str) -> list:
-    """Load transcript from YouTube video."""
+    """Load transcript from YouTube video using youtube-transcript-api directly."""
     try:
-        loader = YoutubeLoader.from_youtube_url(
-            video_url,
-            add_video_info=True,
-            language=["en", "hi"],
-            translation="en"
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            st.error("Could not extract video ID from URL")
+            return []
+        
+        # Try to get transcript in different languages
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Try to find English transcript first
+            try:
+                transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+            except:
+                # If no English, try to get any available and translate
+                try:
+                    transcript = transcript_list.find_transcript(['hi', 'es', 'fr', 'de'])
+                    transcript = transcript.translate('en')
+                except:
+                    # Get the first available transcript
+                    transcript = transcript_list.find_generated_transcript(['en'])
+            
+            transcript_data = transcript.fetch()
+            
+        except Exception as e:
+            # Fallback: try direct fetch
+            transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi', 'en-US'])
+        
+        # Combine all transcript segments into one text
+        full_text = " ".join([entry['text'] for entry in transcript_data])
+        
+        # Create a LangChain Document
+        document = Document(
+            page_content=full_text,
+            metadata={
+                "source": video_url,
+                "video_id": video_id,
+                "title": f"YouTube Video: {video_id}",
+                "author": "Unknown",
+                "length": sum([entry.get('duration', 0) for entry in transcript_data])
+            }
         )
-        documents = loader.load()
-        return documents
+        
+        return [document]
+        
     except Exception as e:
         st.error(f"Error loading transcript: {str(e)}")
+        st.info("💡 Tip: Make sure the video has captions/subtitles enabled.")
         return []
 
 def create_chunks(documents: list, chunk_size: int = 1000, chunk_overlap: int = 200) -> list:
