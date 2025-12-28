@@ -10,10 +10,10 @@ from dotenv import load_dotenv
 import os
 import re
 
-# Load environment variables
+
 load_dotenv()
 
-# Page configuration
+
 st.set_page_config(
     page_title="YouTube Q&A RAG - With Evaluation",
     page_icon="🎬",
@@ -45,7 +45,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== CORE RAG FUNCTIONS ====================
+
 
 def extract_video_id(url: str) -> str | None:
     """Extract video ID from various YouTube URL formats."""
@@ -66,33 +66,32 @@ def load_youtube_transcript(video_url: str) -> list:
         if not video_id:
             st.error("Could not extract video ID from URL")
             return []
-        
-        # Try to get transcript in different languages
+
         try:
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            # Try to find English transcript first
+     
             try:
                 transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
             except:
-                # If no English, try to get any available and translate
+
                 try:
                     transcript = transcript_list.find_transcript(['hi', 'es', 'fr', 'de'])
                     transcript = transcript.translate('en')
                 except:
-                    # Get the first available transcript
+         
                     transcript = transcript_list.find_generated_transcript(['en'])
             
             transcript_data = transcript.fetch()
             
         except Exception as e:
-            # Fallback: try direct fetch
+ 
             transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi', 'en-US'])
         
-        # Combine all transcript segments into one text
+
         full_text = " ".join([entry['text'] for entry in transcript_data])
         
-        # Create a LangChain Document
+
         document = Document(
             page_content=full_text,
             metadata={
@@ -185,7 +184,6 @@ ANSWER (based only on the context above):"""
     answer = chain.invoke({"context": context, "question": question})
     return answer
 
-# ==================== EVALUATION FUNCTIONS ====================
 
 def calculate_relevance_score(query: str, chunk_text: str, similarity_score: float) -> dict:
     """
@@ -194,10 +192,10 @@ def calculate_relevance_score(query: str, chunk_text: str, similarity_score: flo
     FAISS returns L2 distance (lower = more similar)
     We convert to a 0-100 relevance score.
     """
-    # Convert L2 distance to similarity (approximate)
+  
     relevance_score = max(0, 100 - (similarity_score * 10))
     
-    # Check keyword overlap
+
     query_words = set(query.lower().split())
     chunk_words = set(chunk_text.lower().split())
     keyword_overlap = len(query_words & chunk_words) / max(len(query_words), 1)
@@ -218,7 +216,6 @@ def evaluate_answer(answer: str, context: str) -> dict:
     - Answer length and completeness
     - Explicit uncertainty markers
     """
-    # Check if answer admits lack of information
     uncertainty_phrases = [
         "not available", "not mentioned", "doesn't mention",
         "no information", "cannot find", "not in the video",
@@ -226,7 +223,6 @@ def evaluate_answer(answer: str, context: str) -> dict:
     ]
     has_uncertainty = any(phrase in answer.lower() for phrase in uncertainty_phrases)
     
-    # Simple grounding check: key terms from answer should be in context
     answer_words = set(answer.lower().split())
     context_words = set(context.lower().split())
     grounding_ratio = len(answer_words & context_words) / max(len(answer_words), 1)
@@ -239,7 +235,7 @@ def evaluate_answer(answer: str, context: str) -> dict:
         "potential_hallucination_risk": "Low" if grounding_ratio > 0.3 or has_uncertainty else "Medium"
     }
 
-# ==================== SAMPLE EVALUATION QUESTIONS ====================
+
 
 EVALUATION_QUESTIONS = [
     "What is the main topic of this video?",
@@ -254,7 +250,7 @@ EVALUATION_QUESTIONS = [
     "Are there any statistics or data mentioned?"
 ]
 
-# ==================== SESSION STATE ====================
+
 
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
@@ -267,7 +263,6 @@ if "raw_transcript" not in st.session_state:
 if "evaluation_results" not in st.session_state:
     st.session_state.evaluation_results = []
 
-# ==================== SIDEBAR ====================
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -282,7 +277,7 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # RAG Parameters (for demonstration)
+
     st.header("🔧 RAG Parameters")
     chunk_size = st.slider("Chunk Size", 200, 2000, 1000, 100,
                           help="Size of each text chunk in characters")
@@ -330,8 +325,7 @@ with st.sidebar:
                     st.success(f"✅ Processed! Created {len(st.session_state.chunks)} chunks")
                 else:
                     st.error("Could not load transcript")
-    
-    # Show processing stats
+   
     if st.session_state.chunks:
         st.markdown("---")
         st.header("📊 Processing Stats")
@@ -339,16 +333,15 @@ with st.sidebar:
         st.metric("Avg Chunk Size", f"{sum(len(c.page_content) for c in st.session_state.chunks) // len(st.session_state.chunks)} chars")
         st.metric("Transcript Length", f"{len(st.session_state.raw_transcript):,} chars")
 
-# ==================== MAIN CONTENT ====================
 
 st.markdown('<h1 class="main-header">🎬 YouTube Q&A RAG System</h1>', unsafe_allow_html=True)
 st.markdown("<p style='text-align: center;'>With Evaluation & Transparency Features</p>", unsafe_allow_html=True)
 st.markdown("---")
 
-# Create tabs for different views
+
 tab1, tab2, tab3, tab4 = st.tabs(["💬 Q&A Interface", "🔍 RAG Pipeline Visualization", "📝 Evaluation Suite", "📚 Technical Details"])
 
-# ==================== TAB 1: Q&A Interface ====================
+
 with tab1:
     if st.session_state.video_info:
         st.info(f"**📺 Video:** {st.session_state.video_info['title']} by {st.session_state.video_info['author']}")
@@ -364,17 +357,16 @@ with tab1:
                 st.error("Please process a video first!")
             else:
                 with st.spinner("Processing..."):
-                    # Step 1: Retrieve relevant chunks
+                 
                     retrieved = retrieve_relevant_chunks(
                         st.session_state.vector_store, 
                         user_question, 
                         k=top_k
                     )
                     
-                    # Step 2: Build context from retrieved chunks
                     context = "\n\n---\n\n".join([doc.page_content for doc, score in retrieved])
                     
-                    # Step 3: Generate answer
+      
                     llm = ChatGoogleGenerativeAI(
                         model="gemini-2.0-flash",
                         google_api_key=os.getenv("GOOGLE_API_KEY"),
@@ -382,11 +374,11 @@ with tab1:
                     )
                     answer = generate_answer(llm, context, user_question)
                     
-                    # Display answer
+                  
                     st.markdown("### 🤖 Answer")
                     st.success(answer)
                     
-                    # Evaluate answer
+                   
                     eval_metrics = evaluate_answer(answer, context)
                     
                     st.markdown("### 📊 Answer Metrics")
@@ -411,7 +403,7 @@ with tab1:
                     st.markdown("**Content:**")
                     st.markdown(f"```\n{doc.page_content[:500]}{'...' if len(doc.page_content) > 500 else ''}\n```")
 
-# ==================== TAB 2: RAG Pipeline Visualization ====================
+
 with tab2:
     st.subheader("🔍 RAG Pipeline - Step by Step")
     
@@ -457,7 +449,7 @@ with tab2:
     
     st.markdown("---")
     
-    # Show sample chunks
+
     if st.session_state.chunks:
         st.subheader("📦 Sample Chunks (Chunking Demonstration)")
         
@@ -468,7 +460,6 @@ with tab2:
         if len(st.session_state.chunks) > 3:
             st.caption(f"... and {len(st.session_state.chunks) - 3} more chunks")
 
-# ==================== TAB 3: Evaluation Suite ====================
 with tab3:
     st.subheader("📝 RAG Evaluation Suite")
     
@@ -486,15 +477,13 @@ with tab3:
         st.warning("⚠️ Please process a video first to run evaluations")
     else:
         st.markdown("### 🎯 Evaluation Questions")
-        
-        # Question selection
+       
         selected_questions = st.multiselect(
             "Select questions to evaluate:",
             EVALUATION_QUESTIONS,
             default=EVALUATION_QUESTIONS[:3]
         )
-        
-        # Custom question
+       
         custom_q = st.text_input("Or add a custom question:")
         if custom_q:
             selected_questions.append(custom_q)
@@ -512,14 +501,14 @@ with tab3:
             
             for idx, question in enumerate(selected_questions):
                 with st.spinner(f"Evaluating: {question[:50]}..."):
-                    # Retrieve
+                 
                     retrieved = retrieve_relevant_chunks(st.session_state.vector_store, question, k=top_k)
                     context = "\n\n".join([doc.page_content for doc, score in retrieved])
                     
-                    # Generate
+                    
                     answer = generate_answer(llm, context, question)
                     
-                    # Evaluate
+                    
                     chunk_relevances = [
                         calculate_relevance_score(question, doc.page_content, score)
                         for doc, score in retrieved
@@ -539,12 +528,12 @@ with tab3:
             
             st.success("✅ Evaluation complete!")
         
-        # Display results
+       
         if st.session_state.evaluation_results:
             st.markdown("---")
             st.markdown("### 📊 Evaluation Results")
             
-            # Summary metrics
+           
             avg_relevance = sum(r["avg_relevance"] for r in st.session_state.evaluation_results) / len(st.session_state.evaluation_results)
             avg_grounding = sum(r["answer_evaluation"]["grounding_ratio"] for r in st.session_state.evaluation_results) / len(st.session_state.evaluation_results)
             
@@ -555,7 +544,7 @@ with tab3:
             
             st.markdown("---")
             
-            # Detailed results
+        
             for i, result in enumerate(st.session_state.evaluation_results):
                 with st.expander(f"Q{i+1}: {result['question'][:60]}...", expanded=(i==0)):
                     
@@ -578,7 +567,7 @@ with tab3:
                         st.metric("Hallucination Risk", result['answer_evaluation']['potential_hallucination_risk'])
                         st.metric("Word Count", result['answer_evaluation']['word_count'])
 
-# ==================== TAB 4: Technical Details ====================
+
 with tab4:
     st.subheader("📚 Technical Implementation Details")
     
@@ -688,7 +677,6 @@ with tab4:
     | **Hallucination Risk** | Likelihood of made-up information | Low |
     """)
 
-# ==================== FOOTER ====================
 st.markdown("---")
 st.markdown("""
 <p style='text-align: center; color: gray;'>
