@@ -2,6 +2,8 @@
 
 A powerful Retrieval Augmented Generation (RAG) application that lets you ask questions about any YouTube video using AI. Built with LangChain, FAISS, Google Gemini 2.0 Flash, and Streamlit.
 
+**🎯 Includes Evaluation Suite to demonstrate RAG fundamentals!**
+
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![LangChain](https://img.shields.io/badge/LangChain-0.3+-green.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.38+-red.svg)
@@ -13,7 +15,20 @@ A powerful Retrieval Augmented Generation (RAG) application that lets you ask qu
 - 🔍 **FAISS Vector Search** - Fast and efficient similarity search
 - 🤖 **Google Gemini 2.0 Flash** - State-of-the-art LLM for generating answers
 - 💬 **Interactive Chat Interface** - Ask questions in a conversational manner
-- 📊 **Video Metadata Display** - Shows video title, author, and duration
+- 📊 **Evaluation Suite** - Test and validate RAG performance
+- 🔬 **Transparency Features** - See exactly what context is used for answers
+
+## 🎯 RAG Fundamentals Demonstrated
+
+This project demonstrates the **5 key concepts** evaluators look for:
+
+| Concept | Implementation | Tab |
+|---------|---------------|-----|
+| **1. Chunking** | RecursiveCharacterTextSplitter with configurable size/overlap | Pipeline Visualization |
+| **2. Embeddings** | Google Embedding Model (768-dim vectors) | Pipeline Visualization |
+| **3. Vector Search** | FAISS similarity search with L2 distance | Q&A Interface |
+| **4. Grounded Generation** | Prompt engineered to prevent hallucination | Q&A Interface |
+| **5. Transparency** | Retrieved chunks shown with relevance scores | All tabs |
 
 ## 🏗️ Architecture
 
@@ -104,13 +119,35 @@ A powerful Retrieval Augmented Generation (RAG) application that lets you ask qu
 
 ```
 RAG/
-├── app.py              # Main Streamlit application
+├── app.py              # Main Streamlit application with 4 tabs
 ├── requirements.txt    # Python dependencies
 ├── .env.example        # Environment variables template
 ├── .env                # Your environment variables (gitignored)
 ├── .gitignore          # Git ignore file
 └── README.md           # This file
 ```
+
+## 🔬 Evaluation Suite
+
+The app includes a built-in **Evaluation Suite** with 10 pre-defined questions:
+
+1. What is the main topic of this video?
+2. What are the key points discussed?
+3. Who is the speaker or presenter?
+4. What problems or challenges are mentioned?
+5. What solutions or recommendations are provided?
+6. Are there any specific examples given?
+7. What is the conclusion or final message?
+8. What tools or technologies are mentioned?
+9. What is the target audience for this content?
+10. Are there any statistics or data mentioned?
+
+### Metrics Tracked:
+- **Relevance Score** - How similar retrieved chunks are to the query
+- **L2 Distance** - Raw FAISS distance (lower = better)
+- **Keyword Overlap** - % of query words in retrieved chunks
+- **Grounding Ratio** - % of answer words found in context
+- **Hallucination Risk** - Low/Medium indicator
 
 ## ⚙️ Configuration
 

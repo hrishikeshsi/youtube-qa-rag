@@ -3,9 +3,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_community.document_loaders import YoutubeLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.retrieval import create_retrieval_chain
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
 import os
 import re
@@ -15,7 +14,7 @@ load_dotenv()
 
 # Page configuration
 st.set_page_config(
-    page_title="YouTube Q&A with RAG",
+    page_title="YouTube Q&A RAG - With Evaluation",
     page_icon="🎬",
     layout="wide"
 )
@@ -27,17 +26,25 @@ st.markdown("""
         font-size: 2.5rem;
         color: #FF0000;
         text-align: center;
-        margin-bottom: 2rem;
+        margin-bottom: 1rem;
     }
-    .stTextInput > div > div > input {
-        font-size: 1.1rem;
+    .chunk-box {
+        background-color: #f0f2f6;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+        border-left: 4px solid #1f77b4;
+    }
+    .metric-card {
+        background-color: #e8f4ea;
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Header
-st.markdown('<h1 class="main-header">🎬 YouTube Video Q&A with RAG</h1>', unsafe_allow_html=True)
-st.markdown("---")
+# ==================== CORE RAG FUNCTIONS ====================
 
 def extract_video_id(url: str) -> str | None:
     """Extract video ID from various YouTube URL formats."""
@@ -66,90 +73,194 @@ def load_youtube_transcript(video_url: str) -> list:
         st.error(f"Error loading transcript: {str(e)}")
         return []
 
-def create_vector_store(documents: list) -> FAISS:
-    """Create FAISS vector store from documents."""
-    # Split documents into chunks
+def create_chunks(documents: list, chunk_size: int = 1000, chunk_overlap: int = 200) -> list:
+    """
+    CHUNKING: Split documents into smaller, overlapping chunks.
+    
+    Why chunking matters:
+    - LLMs have context limits
+    - Smaller chunks = more precise retrieval
+    - Overlap ensures context isn't lost at boundaries
+    """
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
     chunks = text_splitter.split_documents(documents)
+    return chunks
+
+def create_vector_store(chunks: list) -> FAISS:
+    """
+    EMBEDDINGS + VECTOR STORE: Convert text to vectors and store in FAISS.
     
-    # Create embeddings
+    Process:
+    1. Each chunk → Google Embedding Model → 768-dim vector
+    2. Vectors stored in FAISS index for fast similarity search
+    """
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/embedding-001",
         google_api_key=os.getenv("GOOGLE_API_KEY")
     )
-    
-    # Create FAISS vector store
     vector_store = FAISS.from_documents(chunks, embeddings)
     return vector_store
 
-def create_qa_chain(vector_store: FAISS):
-    """Create the QA chain with Gemini."""
-    # Initialize Gemini LLM
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-        temperature=0.3
-    )
+def retrieve_relevant_chunks(vector_store: FAISS, query: str, k: int = 4) -> list:
+    """
+    VECTOR SEARCH: Find most similar chunks to the query.
     
-    # Custom prompt template
-    prompt = ChatPromptTemplate.from_template(
-        """You are a helpful AI assistant that answers questions based on YouTube video content.
-        Use the following context from the video transcript to answer the question.
-        If you cannot find the answer in the context, say "I couldn't find specific information about this in the video."
-        
-        Context from video:
-        {context}
-        
-        Question: {input}
-        
-        Provide a clear, concise, and helpful answer:"""
-    )
-    
-    # Create document chain and retrieval chain
-    document_chain = create_stuff_documents_chain(llm, prompt)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-    qa_chain = create_retrieval_chain(retriever, document_chain)
-    
-    return qa_chain
+    Uses cosine similarity to find k nearest neighbors.
+    Returns chunks with similarity scores.
+    """
+    docs_with_scores = vector_store.similarity_search_with_score(query, k=k)
+    return docs_with_scores
 
-# Initialize session state
+def generate_answer(llm, context: str, question: str) -> str:
+    """
+    GROUNDED GENERATION: Generate answer based ONLY on retrieved context.
+    
+    The prompt explicitly instructs the model to:
+    - Only use provided context
+    - Admit when information isn't available
+    - Avoid hallucination
+    """
+    prompt = ChatPromptTemplate.from_template(
+        """You are a helpful AI assistant. Answer the question based ONLY on the provided context.
+        
+IMPORTANT RULES:
+1. ONLY use information from the context below
+2. If the answer is not in the context, say "This information is not available in the video transcript."
+3. Do NOT make up or assume any information
+4. Quote relevant parts when possible
+5. Be concise and accurate
+
+CONTEXT FROM VIDEO TRANSCRIPT:
+{context}
+
+QUESTION: {question}
+
+ANSWER (based only on the context above):"""
+    )
+    
+    chain = prompt | llm | StrOutputParser()
+    answer = chain.invoke({"context": context, "question": question})
+    return answer
+
+# ==================== EVALUATION FUNCTIONS ====================
+
+def calculate_relevance_score(query: str, chunk_text: str, similarity_score: float) -> dict:
+    """
+    Calculate relevance metrics for a retrieved chunk.
+    
+    FAISS returns L2 distance (lower = more similar)
+    We convert to a 0-100 relevance score.
+    """
+    # Convert L2 distance to similarity (approximate)
+    relevance_score = max(0, 100 - (similarity_score * 10))
+    
+    # Check keyword overlap
+    query_words = set(query.lower().split())
+    chunk_words = set(chunk_text.lower().split())
+    keyword_overlap = len(query_words & chunk_words) / max(len(query_words), 1)
+    
+    return {
+        "relevance_score": round(relevance_score, 2),
+        "l2_distance": round(similarity_score, 4),
+        "keyword_overlap": round(keyword_overlap * 100, 2),
+        "chunk_length": len(chunk_text)
+    }
+
+def evaluate_answer(answer: str, context: str) -> dict:
+    """
+    Evaluate answer quality for hallucination detection.
+    
+    Checks:
+    - Is answer grounded in context?
+    - Answer length and completeness
+    - Explicit uncertainty markers
+    """
+    # Check if answer admits lack of information
+    uncertainty_phrases = [
+        "not available", "not mentioned", "doesn't mention",
+        "no information", "cannot find", "not in the video",
+        "not specified", "unclear from"
+    ]
+    has_uncertainty = any(phrase in answer.lower() for phrase in uncertainty_phrases)
+    
+    # Simple grounding check: key terms from answer should be in context
+    answer_words = set(answer.lower().split())
+    context_words = set(context.lower().split())
+    grounding_ratio = len(answer_words & context_words) / max(len(answer_words), 1)
+    
+    return {
+        "answer_length": len(answer),
+        "word_count": len(answer.split()),
+        "grounding_ratio": round(grounding_ratio * 100, 2),
+        "has_uncertainty_marker": has_uncertainty,
+        "potential_hallucination_risk": "Low" if grounding_ratio > 0.3 or has_uncertainty else "Medium"
+    }
+
+# ==================== SAMPLE EVALUATION QUESTIONS ====================
+
+EVALUATION_QUESTIONS = [
+    "What is the main topic of this video?",
+    "What are the key points discussed?",
+    "Who is the speaker or presenter?",
+    "What problems or challenges are mentioned?",
+    "What solutions or recommendations are provided?",
+    "Are there any specific examples given?",
+    "What is the conclusion or final message?",
+    "What tools or technologies are mentioned?",
+    "What is the target audience for this content?",
+    "Are there any statistics or data mentioned?"
+]
+
+# ==================== SESSION STATE ====================
+
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
-if "qa_chain" not in st.session_state:
-    st.session_state.qa_chain = None
+if "chunks" not in st.session_state:
+    st.session_state.chunks = []
 if "video_info" not in st.session_state:
     st.session_state.video_info = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+if "raw_transcript" not in st.session_state:
+    st.session_state.raw_transcript = ""
+if "evaluation_results" not in st.session_state:
+    st.session_state.evaluation_results = []
 
-# Sidebar
+# ==================== SIDEBAR ====================
+
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # API Key input (optional - can use .env)
     api_key = st.text_input(
-        "Google API Key (optional if in .env)",
+        "Google API Key",
         type="password",
-        help="Enter your Google API key or set it in .env file"
+        help="Get from: https://aistudio.google.com/app/apikey"
     )
-    
     if api_key:
         os.environ["GOOGLE_API_KEY"] = api_key
     
     st.markdown("---")
+    
+    # RAG Parameters (for demonstration)
+    st.header("🔧 RAG Parameters")
+    chunk_size = st.slider("Chunk Size", 200, 2000, 1000, 100,
+                          help="Size of each text chunk in characters")
+    chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200, 50,
+                             help="Overlap between consecutive chunks")
+    top_k = st.slider("Top-K Retrieval", 1, 10, 4,
+                     help="Number of chunks to retrieve")
+    
+    st.markdown("---")
     st.header("📹 Video Input")
     
-    # YouTube URL input
     youtube_url = st.text_input(
-        "Enter YouTube URL",
-        placeholder="https://www.youtube.com/watch?v=..."
+        "YouTube URL",
+        placeholder="https://youtube.com/watch?v=..."
     )
     
-    # Process video button
     if st.button("🔄 Process Video", type="primary", use_container_width=True):
         if not youtube_url:
             st.error("Please enter a YouTube URL")
@@ -160,108 +271,391 @@ with st.sidebar:
             if not video_id:
                 st.error("Invalid YouTube URL")
             else:
-                with st.spinner("Loading video transcript..."):
+                with st.spinner("Step 1/3: Loading transcript..."):
                     documents = load_youtube_transcript(youtube_url)
+                
+                if documents:
+                    st.session_state.raw_transcript = documents[0].page_content
+                    st.session_state.video_info = {
+                        "title": documents[0].metadata.get("title", "Unknown"),
+                        "author": documents[0].metadata.get("author", "Unknown"),
+                        "length": documents[0].metadata.get("length", 0)
+                    }
                     
-                    if documents:
-                        st.session_state.video_info = {
-                            "title": documents[0].metadata.get("title", "Unknown"),
-                            "author": documents[0].metadata.get("author", "Unknown"),
-                            "length": documents[0].metadata.get("length", 0)
-                        }
-                        
-                        with st.spinner("Creating embeddings and vector store..."):
-                            st.session_state.vector_store = create_vector_store(documents)
-                            st.session_state.qa_chain = create_qa_chain(st.session_state.vector_store)
-                            st.session_state.chat_history = []
-                            st.success("✅ Video processed successfully!")
-                    else:
-                        st.error("Could not load video transcript")
+                    with st.spinner("Step 2/3: Chunking transcript..."):
+                        st.session_state.chunks = create_chunks(documents, chunk_size, chunk_overlap)
+                    
+                    with st.spinner("Step 3/3: Creating embeddings & vector store..."):
+                        st.session_state.vector_store = create_vector_store(st.session_state.chunks)
+                    
+                    st.session_state.evaluation_results = []
+                    st.success(f"✅ Processed! Created {len(st.session_state.chunks)} chunks")
+                else:
+                    st.error("Could not load transcript")
     
-    # Clear chat button
-    if st.button("🗑️ Clear Chat", use_container_width=True):
-        st.session_state.chat_history = []
-        st.rerun()
+    # Show processing stats
+    if st.session_state.chunks:
+        st.markdown("---")
+        st.header("📊 Processing Stats")
+        st.metric("Total Chunks", len(st.session_state.chunks))
+        st.metric("Avg Chunk Size", f"{sum(len(c.page_content) for c in st.session_state.chunks) // len(st.session_state.chunks)} chars")
+        st.metric("Transcript Length", f"{len(st.session_state.raw_transcript):,} chars")
 
-# Main content area
-col1, col2 = st.columns([2, 1])
+# ==================== MAIN CONTENT ====================
 
-with col1:
-    # Video info display
+st.markdown('<h1 class="main-header">🎬 YouTube Q&A RAG System</h1>', unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>With Evaluation & Transparency Features</p>", unsafe_allow_html=True)
+st.markdown("---")
+
+# Create tabs for different views
+tab1, tab2, tab3, tab4 = st.tabs(["💬 Q&A Interface", "🔍 RAG Pipeline Visualization", "📝 Evaluation Suite", "📚 Technical Details"])
+
+# ==================== TAB 1: Q&A Interface ====================
+with tab1:
     if st.session_state.video_info:
-        st.subheader("📺 Current Video")
-        st.info(f"""
-        **Title:** {st.session_state.video_info['title']}  
-        **Author:** {st.session_state.video_info['author']}  
-        **Duration:** {st.session_state.video_info['length'] // 60} minutes
-        """)
+        st.info(f"**📺 Video:** {st.session_state.video_info['title']} by {st.session_state.video_info['author']}")
     
-    # Chat interface
-    st.subheader("💬 Ask Questions")
+    col1, col2 = st.columns([3, 2])
     
-    # Display chat history
-    for i, (question, answer) in enumerate(st.session_state.chat_history):
-        with st.chat_message("user"):
-            st.write(question)
-        with st.chat_message("assistant"):
-            st.write(answer)
-    
-    # Question input
-    user_question = st.chat_input("Ask a question about the video...")
-    
-    if user_question:
-        if not st.session_state.qa_chain:
-            st.error("Please process a YouTube video first!")
-        else:
-            with st.chat_message("user"):
-                st.write(user_question)
-            
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    result = st.session_state.qa_chain.invoke({"input": user_question})
-                    answer = result["answer"]
-                    st.write(answer)
+    with col1:
+        st.subheader("Ask a Question")
+        user_question = st.text_input("Your question:", placeholder="What is this video about?")
+        
+        if st.button("🔍 Get Answer", type="primary") and user_question:
+            if not st.session_state.vector_store:
+                st.error("Please process a video first!")
+            else:
+                with st.spinner("Processing..."):
+                    # Step 1: Retrieve relevant chunks
+                    retrieved = retrieve_relevant_chunks(
+                        st.session_state.vector_store, 
+                        user_question, 
+                        k=top_k
+                    )
                     
-                    # Add to chat history
-                    st.session_state.chat_history.append((user_question, answer))
+                    # Step 2: Build context from retrieved chunks
+                    context = "\n\n---\n\n".join([doc.page_content for doc, score in retrieved])
+                    
+                    # Step 3: Generate answer
+                    llm = ChatGoogleGenerativeAI(
+                        model="gemini-2.0-flash",
+                        google_api_key=os.getenv("GOOGLE_API_KEY"),
+                        temperature=0.2
+                    )
+                    answer = generate_answer(llm, context, user_question)
+                    
+                    # Display answer
+                    st.markdown("### 🤖 Answer")
+                    st.success(answer)
+                    
+                    # Evaluate answer
+                    eval_metrics = evaluate_answer(answer, context)
+                    
+                    st.markdown("### 📊 Answer Metrics")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Word Count", eval_metrics["word_count"])
+                    m2.metric("Grounding %", f"{eval_metrics['grounding_ratio']}%")
+                    m3.metric("Hallucination Risk", eval_metrics["potential_hallucination_risk"])
+    
+    with col2:
+        st.subheader("🎯 Retrieved Context")
+        st.caption("TRANSPARENCY: These are the exact chunks used to generate the answer")
+        
+        if user_question and st.session_state.vector_store:
+            retrieved = retrieve_relevant_chunks(st.session_state.vector_store, user_question, k=top_k)
+            
+            for i, (doc, score) in enumerate(retrieved):
+                relevance = calculate_relevance_score(user_question, doc.page_content, score)
+                
+                with st.expander(f"📄 Chunk {i+1} | Relevance: {relevance['relevance_score']}%", expanded=(i==0)):
+                    st.markdown(f"**L2 Distance:** {relevance['l2_distance']}")
+                    st.markdown(f"**Keyword Overlap:** {relevance['keyword_overlap']}%")
+                    st.markdown("**Content:**")
+                    st.markdown(f"```\n{doc.page_content[:500]}{'...' if len(doc.page_content) > 500 else ''}\n```")
 
-with col2:
-    # Instructions
-    st.subheader("📖 How to Use")
+# ==================== TAB 2: RAG Pipeline Visualization ====================
+with tab2:
+    st.subheader("🔍 RAG Pipeline - Step by Step")
+    
     st.markdown("""
-    1. **Enter your Google API Key** in the sidebar (or set in `.env` file)
-    2. **Paste a YouTube URL** in the sidebar
-    3. **Click "Process Video"** to load the transcript
-    4. **Ask questions** about the video content!
-    
-    ---
-    
-    **Supported URLs:**
-    - `youtube.com/watch?v=...`
-    - `youtu.be/...`
-    - `youtube.com/shorts/...`
-    
-    ---
-    
-    **Tips:**
-    - Ask specific questions for better answers
-    - The AI uses the video transcript for context
-    - Works best with videos that have transcripts/captions
+    This visualization shows each step of the RAG (Retrieval Augmented Generation) pipeline:
     """)
     
-    # Example questions
-    if st.session_state.video_info:
-        st.subheader("💡 Example Questions")
-        st.markdown("""
-        - What is this video about?
-        - What are the main topics covered?
-        - Can you summarize the key points?
-        - What did they say about [specific topic]?
-        """)
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.markdown("### 1️⃣ LOAD")
+        st.markdown("**YouTube Transcript**")
+        st.markdown("Extract text from video captions/subtitles")
+        if st.session_state.raw_transcript:
+            st.success(f"✅ {len(st.session_state.raw_transcript):,} chars")
+    
+    with col2:
+        st.markdown("### 2️⃣ CHUNK")
+        st.markdown("**Text Splitting**")
+        st.markdown(f"Split into overlapping chunks ({chunk_size} chars, {chunk_overlap} overlap)")
+        if st.session_state.chunks:
+            st.success(f"✅ {len(st.session_state.chunks)} chunks")
+    
+    with col3:
+        st.markdown("### 3️⃣ EMBED")
+        st.markdown("**Vectorization**")
+        st.markdown("Convert text to 768-dim vectors using Google Embeddings")
+        if st.session_state.vector_store:
+            st.success("✅ Embedded")
+    
+    with col4:
+        st.markdown("### 4️⃣ STORE")
+        st.markdown("**FAISS Index**")
+        st.markdown("Store vectors for fast similarity search")
+        if st.session_state.vector_store:
+            st.success("✅ Indexed")
+    
+    with col5:
+        st.markdown("### 5️⃣ RETRIEVE")
+        st.markdown("**Vector Search**")
+        st.markdown(f"Find top-{top_k} most similar chunks to query")
+        st.info("Ready")
+    
+    st.markdown("---")
+    
+    # Show sample chunks
+    if st.session_state.chunks:
+        st.subheader("📦 Sample Chunks (Chunking Demonstration)")
+        
+        for i, chunk in enumerate(st.session_state.chunks[:3]):
+            with st.expander(f"Chunk {i+1} of {len(st.session_state.chunks)} | {len(chunk.page_content)} characters"):
+                st.text(chunk.page_content)
+        
+        if len(st.session_state.chunks) > 3:
+            st.caption(f"... and {len(st.session_state.chunks) - 3} more chunks")
 
-# Footer
+# ==================== TAB 3: Evaluation Suite ====================
+with tab3:
+    st.subheader("📝 RAG Evaluation Suite")
+    
+    st.markdown("""
+    This section allows systematic evaluation of the RAG system's performance.
+    
+    **What we're testing:**
+    - ✅ Retrieved chunk relevance
+    - ✅ Answer completeness  
+    - ✅ Hallucination detection
+    - ✅ Grounded generation
+    """)
+    
+    if not st.session_state.vector_store:
+        st.warning("⚠️ Please process a video first to run evaluations")
+    else:
+        st.markdown("### 🎯 Evaluation Questions")
+        
+        # Question selection
+        selected_questions = st.multiselect(
+            "Select questions to evaluate:",
+            EVALUATION_QUESTIONS,
+            default=EVALUATION_QUESTIONS[:3]
+        )
+        
+        # Custom question
+        custom_q = st.text_input("Or add a custom question:")
+        if custom_q:
+            selected_questions.append(custom_q)
+        
+        if st.button("🚀 Run Evaluation", type="primary"):
+            st.session_state.evaluation_results = []
+            
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                google_api_key=os.getenv("GOOGLE_API_KEY"),
+                temperature=0.2
+            )
+            
+            progress = st.progress(0)
+            
+            for idx, question in enumerate(selected_questions):
+                with st.spinner(f"Evaluating: {question[:50]}..."):
+                    # Retrieve
+                    retrieved = retrieve_relevant_chunks(st.session_state.vector_store, question, k=top_k)
+                    context = "\n\n".join([doc.page_content for doc, score in retrieved])
+                    
+                    # Generate
+                    answer = generate_answer(llm, context, question)
+                    
+                    # Evaluate
+                    chunk_relevances = [
+                        calculate_relevance_score(question, doc.page_content, score)
+                        for doc, score in retrieved
+                    ]
+                    answer_eval = evaluate_answer(answer, context)
+                    
+                    st.session_state.evaluation_results.append({
+                        "question": question,
+                        "answer": answer,
+                        "retrieved_chunks": [(doc.page_content[:200], score) for doc, score in retrieved],
+                        "chunk_relevances": chunk_relevances,
+                        "answer_evaluation": answer_eval,
+                        "avg_relevance": sum(r["relevance_score"] for r in chunk_relevances) / len(chunk_relevances)
+                    })
+                
+                progress.progress((idx + 1) / len(selected_questions))
+            
+            st.success("✅ Evaluation complete!")
+        
+        # Display results
+        if st.session_state.evaluation_results:
+            st.markdown("---")
+            st.markdown("### 📊 Evaluation Results")
+            
+            # Summary metrics
+            avg_relevance = sum(r["avg_relevance"] for r in st.session_state.evaluation_results) / len(st.session_state.evaluation_results)
+            avg_grounding = sum(r["answer_evaluation"]["grounding_ratio"] for r in st.session_state.evaluation_results) / len(st.session_state.evaluation_results)
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Avg Chunk Relevance", f"{avg_relevance:.1f}%")
+            m2.metric("Avg Answer Grounding", f"{avg_grounding:.1f}%")
+            m3.metric("Questions Evaluated", len(st.session_state.evaluation_results))
+            
+            st.markdown("---")
+            
+            # Detailed results
+            for i, result in enumerate(st.session_state.evaluation_results):
+                with st.expander(f"Q{i+1}: {result['question'][:60]}...", expanded=(i==0)):
+                    
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.markdown("**🤖 Generated Answer:**")
+                        st.info(result["answer"])
+                        
+                        st.markdown("**📄 Retrieved Chunks:**")
+                        for j, (chunk, score) in enumerate(result["retrieved_chunks"]):
+                            rel = result["chunk_relevances"][j]
+                            st.markdown(f"*Chunk {j+1}* (Relevance: {rel['relevance_score']}%, Distance: {rel['l2_distance']})")
+                            st.text(chunk + "...")
+                    
+                    with col2:
+                        st.markdown("**📊 Metrics:**")
+                        st.metric("Avg Chunk Relevance", f"{result['avg_relevance']:.1f}%")
+                        st.metric("Answer Grounding", f"{result['answer_evaluation']['grounding_ratio']}%")
+                        st.metric("Hallucination Risk", result['answer_evaluation']['potential_hallucination_risk'])
+                        st.metric("Word Count", result['answer_evaluation']['word_count'])
+
+# ==================== TAB 4: Technical Details ====================
+with tab4:
+    st.subheader("📚 Technical Implementation Details")
+    
+    st.markdown("""
+    ## RAG Fundamentals Demonstrated
+    
+    ### 1️⃣ Chunking
+    **What:** Breaking large documents into smaller, overlapping pieces.
+    
+    **Why it matters:**
+    - LLMs have limited context windows
+    - Smaller chunks enable more precise retrieval
+    - Overlap prevents losing context at boundaries
+    
+    **Our implementation:**
+    ```python
+    RecursiveCharacterTextSplitter(
+        chunk_size=1000,      # Characters per chunk
+        chunk_overlap=200,    # Overlap between chunks
+        separators=["\\n\\n", "\\n", ". ", " ", ""]
+    )
+    ```
+    
+    ---
+    
+    ### 2️⃣ Embeddings
+    **What:** Converting text into dense numerical vectors.
+    
+    **Why it matters:**
+    - Captures semantic meaning, not just keywords
+    - Enables similarity comparison between texts
+    - Foundation for vector search
+    
+    **Our implementation:**
+    ```python
+    GoogleGenerativeAIEmbeddings(
+        model="models/embedding-001"  # 768-dimensional vectors
+    )
+    ```
+    
+    ---
+    
+    ### 3️⃣ Vector Search (FAISS)
+    **What:** Finding most similar chunks to a query using vector similarity.
+    
+    **Why it matters:**
+    - Fast approximate nearest neighbor search
+    - Scales to millions of vectors
+    - Returns relevant context for generation
+    
+    **Our implementation:**
+    ```python
+    # Index creation
+    FAISS.from_documents(chunks, embeddings)
+    
+    # Retrieval with scores
+    vector_store.similarity_search_with_score(query, k=4)
+    ```
+    
+    ---
+    
+    ### 4️⃣ Grounded Generation
+    **What:** Generating answers based ONLY on retrieved context.
+    
+    **Why it matters:**
+    - Prevents hallucination
+    - Answers are traceable to source
+    - User can verify accuracy
+    
+    **Our implementation:**
+    ```python
+    prompt = \"\"\"Answer based ONLY on the provided context.
+    If the answer is not in the context, say "This information 
+    is not available in the video transcript."
+    
+    CONTEXT: {context}
+    QUESTION: {question}\"\"\"
+    ```
+    
+    ---
+    
+    ### 5️⃣ Transparency
+    **What:** Showing users exactly what context was used.
+    
+    **Why it matters:**
+    - Builds trust in the system
+    - Enables verification of answers
+    - Helps identify retrieval failures
+    
+    **Our implementation:**
+    - Display retrieved chunks with relevance scores
+    - Show L2 distance and keyword overlap
+    - Highlight potential hallucination risks
+    """)
+    
+    st.markdown("---")
+    
+    st.markdown("""
+    ## Evaluation Metrics Explained
+    
+    | Metric | Description | Good Value |
+    |--------|-------------|------------|
+    | **Relevance Score** | How similar retrieved chunk is to query (0-100) | > 70% |
+    | **L2 Distance** | Raw FAISS distance (lower = more similar) | < 1.0 |
+    | **Keyword Overlap** | % of query words found in chunk | > 30% |
+    | **Grounding Ratio** | % of answer words found in context | > 30% |
+    | **Hallucination Risk** | Likelihood of made-up information | Low |
+    """)
+
+# ==================== FOOTER ====================
 st.markdown("---")
-st.markdown(
-    "<p style='text-align: center; color: gray;'>Built with LangChain, FAISS, Google Gemini & Streamlit</p>",
-    unsafe_allow_html=True
-)
+st.markdown("""
+<p style='text-align: center; color: gray;'>
+    <strong>YouTube Q&A RAG System</strong><br>
+    Built with LangChain | FAISS | Google Gemini 2.0 Flash | Streamlit<br>
+    <em>Demonstrating: Chunking • Embeddings • Vector Search • Grounded Generation • Transparency</em>
+</p>
+""", unsafe_allow_html=True)
